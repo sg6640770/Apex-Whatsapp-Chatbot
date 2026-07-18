@@ -99,7 +99,11 @@ function Dashboard() {
         (payload) => {
           const newConv = payload.new as Conversation;
           setConversations(prev => {
-            const next = [newConv, ...prev];
+            // Guard: if already present (e.g. loaded by initial fetch), treat as update
+            const exists = prev.find(c => c.phone_number === newConv.phone_number);
+            const next = exists
+              ? prev.map(c => c.phone_number === newConv.phone_number ? newConv : c)
+              : [newConv, ...prev];
             return next.sort((a, b) => new Date(b.last_message_at).getTime() - new Date(a.last_message_at).getTime());
           });
         }
@@ -115,23 +119,24 @@ function Dashboard() {
           
           if (newMsg.phone_number === selectedPhoneRef.current) {
             setMessages(prev => {
-              // Try to remove an optimistic message if it matches closely
-              // We'll just remove optimistic messages that have same body and within last 10s
-              const nowTime = new Date(newMsg.timestamp).getTime();
-              const filtered = prev.filter(m => {
-                if (m.optimistic && m.body === newMsg.body) {
-                  const msgTime = new Date(m.timestamp).getTime();
-                  if (Math.abs(nowTime - msgTime) < 10000) {
-                    return false; // remove optimistic
-                  }
+              // For outbound messages, replace the first matching optimistic bubble by body.
+              // Timestamp-based matching is unreliable because n8n may write the message
+              // to Supabase with a timestamp that differs from the local optimistic timestamp.
+              if (newMsg.direction === 'outbound') {
+                const optimisticIdx = prev.findIndex(
+                  m => m.optimistic && m.body === newMsg.body
+                );
+                if (optimisticIdx !== -1) {
+                  const next = [...prev];
+                  next[optimisticIdx] = newMsg; // replace in-place, preserving order
+                  return next;
                 }
-                return true;
-              });
-              
-              // avoid adding duplicates if somehow received multiple times
-              if (filtered.some(m => m.id === newMsg.id)) return filtered;
-              
-              return [...filtered, newMsg];
+              }
+
+              // Avoid adding duplicates (e.g. re-subscription replay)
+              if (prev.some(m => m.id === newMsg.id)) return prev;
+
+              return [...prev, newMsg];
             });
             
             // If the message is inbound and we are currently viewing this thread,
@@ -177,7 +182,7 @@ function Dashboard() {
     setMessages(prev => [...prev, optimisticMsg]);
 
     try {
-      const response = await fetch('https://shreyahubcredo.app.n8n.cloud/webhook/message-sent', {
+      const response = await fetch('https://shreyahubcredo.app.n8n.cloud/webhook-test/message-sent', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
