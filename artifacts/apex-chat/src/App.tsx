@@ -1,45 +1,251 @@
-import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import { Toaster } from '@/components/ui/toaster';
-import { TooltipProvider } from '@/components/ui/tooltip';
-import NotFound from '@/pages/not-found';
+import { useEffect, useState, useRef } from 'react';
 import { Route, Switch, Router as WouterRouter } from 'wouter';
+import { supabase } from './lib/supabase';
+import { Conversation, Message } from './lib/types';
+import { Sidebar } from './components/Sidebar';
+import { ChatWindow } from './components/ChatWindow';
+import { cn } from './lib/utils';
 
-const queryClient = new QueryClient();
+function Dashboard() {
+  const [conversations, setConversations] = useState<Conversation[]>([]);
+  const [selectedPhone, setSelectedPhone] = useState<string | null>(null);
+  const [messages, setMessages] = useState<Message[]>([]);
+  const [isMobileChatOpen, setIsMobileChatOpen] = useState(false);
+  const selectedPhoneRef = useRef<string | null>(null);
 
-function Home() {
+  // Sync ref for realtime callbacks
+  useEffect(() => {
+    selectedPhoneRef.current = selectedPhone;
+  }, [selectedPhone]);
+
+  // Initial fetch: Conversations
+  useEffect(() => {
+    const fetchConversations = async () => {
+      const { data, error } = await supabase
+        .from('conversations')
+        .select('*')
+        .order('last_message_at', { ascending: false });
+
+      if (error) {
+        console.error('Error fetching conversations:', error);
+      } else if (data) {
+        setConversations(data as Conversation[]);
+      }
+    };
+
+    fetchConversations();
+  }, []);
+
+  // Fetch messages when conversation is selected
+  useEffect(() => {
+    if (!selectedPhone) {
+      setMessages([]);
+      return;
+    }
+
+    const fetchMessages = async () => {
+      const { data, error } = await supabase
+        .from('messages')
+        .select('*')
+        .eq('phone_number', selectedPhone)
+        .order('timestamp', { ascending: true });
+
+      if (error) {
+        console.error('Error fetching messages:', error);
+      } else if (data) {
+        setMessages(data as Message[]);
+      }
+      
+      // Reset unread count
+      const conv = conversations.find(c => c.phone_number === selectedPhone);
+      if (conv && conv.unread_count > 0) {
+        await supabase
+          .from('conversations')
+          .update({ unread_count: 0 })
+          .eq('phone_number', selectedPhone);
+          
+        setConversations(prev => 
+          prev.map(c => c.phone_number === selectedPhone ? { ...c, unread_count: 0 } : c)
+        );
+      }
+    };
+
+    fetchMessages();
+  }, [selectedPhone]); // Note: conversations is not in deps to prevent infinite loops
+
+  // Realtime Subscriptions
+  useEffect(() => {
+    const conversationsChannel = supabase.channel('public:conversations')
+      .on(
+        'postgres_changes',
+        { event: 'UPDATE', schema: 'public', table: 'conversations' },
+        (payload) => {
+          const updatedConv = payload.new as Conversation;
+          setConversations(prev => {
+            const exists = prev.find(c => c.phone_number === updatedConv.phone_number);
+            let next;
+            if (exists) {
+              next = prev.map(c => c.phone_number === updatedConv.phone_number ? updatedConv : c);
+            } else {
+              next = [updatedConv, ...prev];
+            }
+            return next.sort((a, b) => new Date(b.last_message_at).getTime() - new Date(a.last_message_at).getTime());
+          });
+        }
+      )
+      .on(
+        'postgres_changes',
+        { event: 'INSERT', schema: 'public', table: 'conversations' },
+        (payload) => {
+          const newConv = payload.new as Conversation;
+          setConversations(prev => {
+            const next = [newConv, ...prev];
+            return next.sort((a, b) => new Date(b.last_message_at).getTime() - new Date(a.last_message_at).getTime());
+          });
+        }
+      )
+      .subscribe();
+
+    const messagesChannel = supabase.channel('public:messages')
+      .on(
+        'postgres_changes',
+        { event: 'INSERT', schema: 'public', table: 'messages' },
+        (payload) => {
+          const newMsg = payload.new as Message;
+          
+          if (newMsg.phone_number === selectedPhoneRef.current) {
+            setMessages(prev => {
+              // Try to remove an optimistic message if it matches closely
+              // We'll just remove optimistic messages that have same body and within last 10s
+              const nowTime = new Date(newMsg.timestamp).getTime();
+              const filtered = prev.filter(m => {
+                if (m.optimistic && m.body === newMsg.body) {
+                  const msgTime = new Date(m.timestamp).getTime();
+                  if (Math.abs(nowTime - msgTime) < 10000) {
+                    return false; // remove optimistic
+                  }
+                }
+                return true;
+              });
+              
+              // avoid adding duplicates if somehow received multiple times
+              if (filtered.some(m => m.id === newMsg.id)) return filtered;
+              
+              return [...filtered, newMsg];
+            });
+            
+            // If the message is inbound and we are currently viewing this thread,
+            // we should ideally mark it as read immediately. But the db trigger or external
+            // system might increment unread_count. We will clear it locally and remotely.
+            if (newMsg.direction === 'inbound') {
+              supabase.from('conversations').update({ unread_count: 0 }).eq('phone_number', selectedPhoneRef.current);
+            }
+          }
+          
+          // Note: we don't need to manually update conversations state for the last_message 
+          // because the database usually updates the conversations table on message insert (via trigger or backend),
+          // which will trigger the conversations UPDATE event above. 
+          // If there's no DB trigger, we'd need to manually update conversations here.
+          // Assuming the backend handles conversations updates.
+        }
+      )
+      .subscribe();
+
+    return () => {
+      supabase.removeChannel(conversationsChannel);
+      supabase.removeChannel(messagesChannel);
+    };
+  }, []);
+
+  const handleSendMessage = async (text: string) => {
+    if (!selectedPhone) return;
+
+    const tempId = `temp-${Date.now()}`;
+    const optimisticMsg: Message = {
+      id: tempId,
+      phone_number: selectedPhone,
+      wa_message_id: null,
+      direction: 'outbound',
+      message_type: 'text',
+      body: text,
+      media_url: null,
+      status: 'sending',
+      timestamp: new Date().toISOString(),
+      optimistic: true
+    };
+
+    setMessages(prev => [...prev, optimisticMsg]);
+
+    try {
+      const response = await fetch('https://shreyahubcredo.app.n8n.cloud/webhook/message-sent', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          phone_number: selectedPhone,
+          message: text
+        })
+      });
+
+      if (!response.ok) {
+        throw new Error('Failed to send');
+      }
+    } catch (error) {
+      console.error('Send error:', error);
+      setMessages(prev => 
+        prev.map(m => m.id === tempId ? { ...m, status: 'failed', error: true } : m)
+      );
+    }
+  };
+
+  const selectedConversation = conversations.find(c => c.phone_number === selectedPhone) || null;
+
   return (
-    <div className="min-h-screen w-full flex items-center justify-center bg-gray-50">
-      <div className="text-center">
-        <h1 className="text-2xl font-bold text-gray-900">
-          Replit Agent is building...
-        </h1>
-        <p className="mt-2 text-sm text-gray-600">
-          Your app will appear here once it's ready.
-        </p>
+    <div className="h-[100dvh] w-full flex overflow-hidden bg-background">
+      {/* Sidebar - hidden on mobile if chat is open */}
+      <div 
+        className={cn(
+          "w-full md:w-[350px] lg:w-[400px] flex-shrink-0 h-full",
+          isMobileChatOpen ? "hidden md:block" : "block"
+        )}
+      >
+        <Sidebar 
+          conversations={conversations}
+          selectedPhone={selectedPhone}
+          onSelectConversation={(conv) => {
+            setSelectedPhone(conv.phone_number);
+            setIsMobileChatOpen(true);
+          }}
+        />
+      </div>
+
+      {/* Main Chat Panel - hidden on mobile if chat is not open */}
+      <div 
+        className={cn(
+          "flex-1 h-full w-full",
+          !isMobileChatOpen ? "hidden md:block" : "block"
+        )}
+      >
+        <ChatWindow 
+          conversation={selectedConversation}
+          messages={messages}
+          onSendMessage={handleSendMessage}
+          onBack={() => setIsMobileChatOpen(false)}
+        />
       </div>
     </div>
   );
 }
 
-function Router() {
-  return (
-    <Switch>
-      <Route path="/" component={Home} />
-      <Route component={NotFound} />
-    </Switch>
-  );
-}
-
 function App() {
   return (
-    <QueryClientProvider client={queryClient}>
-      <TooltipProvider>
-        <WouterRouter base={import.meta.env.BASE_URL.replace(/\/$/, '')}>
-          <Router />
-        </WouterRouter>
-        <Toaster />
-      </TooltipProvider>
-    </QueryClientProvider>
+    <WouterRouter base={import.meta.env.BASE_URL.replace(/\/$/, '')}>
+      <Switch>
+        <Route path="/" component={Dashboard} />
+        <Route>
+          <div className="flex h-screen items-center justify-center">404 - Not Found</div>
+        </Route>
+      </Switch>
+    </WouterRouter>
   );
 }
 
