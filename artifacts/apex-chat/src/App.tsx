@@ -182,7 +182,7 @@ function Dashboard() {
     setMessages(prev => [...prev, optimisticMsg]);
 
     try {
-      const response = await fetch('https://shreyahubcredo.app.n8n.cloud/webhook-test/message-sent', {
+      const response = await fetch('https://shreyahubcredo.app.n8n.cloud/webhook/message-sent', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
