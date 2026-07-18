@@ -1,0 +1,27 @@
+kind = "web"
+previewPath = "/"
+title = "Apex Chat Dashboard"
+version = "1.0.0"
+id = "artifacts/apex-chat"
+router = "path"
+
+[[services]]
+name = "web"
+paths = [ "/" ]
+localPort = 25276
+
+[services.development]
+run = "pnpm --filter @workspace/apex-chat run dev"
+
+[services.production]
+build = [ "pnpm", "--filter", "@workspace/apex-chat", "run", "build" ]
+serve = "static"
+publicDir = "artifacts/apex-chat/dist/public"
+
+[[services.production.rewrites]]
+from = "/*"
+to = "/index.html"
+
+[services.env]
+PORT = "25276"
+BASE_PATH = "/"

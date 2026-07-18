@@ -1,0 +1,40 @@
+Build a WhatsApp-style chat dashboard web app for "Apex School of Business" candidate outreach (internal team tool, not customer-facing).
+
+TECH STACK:
+- React (Vite) frontend
+- Supabase JS client for data + realtime subscriptions
+- Supabase URL: https://yrzgtvlzaxgsfowgamex.supabase.co
+- Supabase anon key: [I will provide separately]
+
+DATA MODEL (already created in Supabase):
+- `conversations` table: phone_number (PK), candidate_name, profile_name, last_message, last_message_at, unread_count, status
+- `messages` table: id, phone_number (FK), wa_message_id, direction ('inbound'/'outbound'), message_type, body, media_url, status, timestamp
+
+LAYOUT (mimic WhatsApp Web):
+1. Left sidebar (~30% width): scrollable list of conversations, sorted by last_message_at DESC. Each row shows candidate_name (or phone_number if name is null), last_message preview (truncated), relative timestamp, and an unread_count badge if >0. Clicking a conversation opens it in the main panel and resets unread_count to 0 in Supabase.
+
+2. Main chat panel (~70% width): 
+   - Header showing candidate_name and phone_number
+   - Scrollable message thread, oldest to newest, auto-scroll to bottom on new message
+   - Inbound messages left-aligned with light gray bubble, outbound messages right-aligned with green bubble (WhatsApp style), each with a small timestamp
+   - Text input at the bottom with a Send button
+
+REALTIME BEHAVIOR:
+- Subscribe to Supabase realtime on `messages` table (INSERT events). When a new inbound message arrives for the currently open conversation, append it to the thread live. If it's for a different conversation, update that conversation's preview/unread badge in the sidebar without needing a refresh.
+- Also subscribe to `conversations` table for ordering/badge updates.
+
+SENDING A MESSAGE:
+- On Send click, do NOT insert directly into Supabase. Instead, POST to this n8n webhook:
+  URL: https://shreyahubcredo.app.n8n.cloud/webhook/message-sent
+  Method: POST
+  Body: { "phone_number": "<recipient>", "message": "<text>" }
+- n8n handles the actual WhatsApp send + Supabase insert for the outbound message on the backend, so after POSTing, just clear the input field — the new message will appear via the realtime subscription once n8n writes it to Supabase.
+- Show a small "sending..." indicator on the message bubble optimistically, and reconcile once the realtime insert confirms it landed (match on a temp local ID or timestamp proximity).
+
+ADDITIONAL:
+- Search/filter bar above the conversation list to filter by candidate name or phone number
+- Empty state when no conversation is selected ("Select a conversation to start chatting")
+- Clean, minimal styling — WhatsApp's green (#075E54 header, #DCF8C6 outbound bubble, #ECE5DD chat background) — but keep it distinctly branded as an internal Apex School of Business tool, not an actual WhatsApp clone logo-wise
+- Mobile-responsive: on small screens, show only the sidebar OR the chat panel at a time, with a back button
+
+Do not include any authentication for now — this is an internal MVP. Keep the codebase simple and in a single App.jsx-driven structure with clear component separation (Sidebar, ChatWindow, MessageBubble).
