@@ -5,7 +5,8 @@ import { Clock, AlertCircle } from 'lucide-react';
 
 const URL_REGEX = /(https?:\/\/[^\s]+)/g;
 
-function linkify(text: string) {
+function linkify(text: string | null | undefined) {
+  if (!text) return null;
   const parts = text.split(URL_REGEX);
   return parts.map((part, i) =>
     URL_REGEX.test(part) ? (
